@@ -1,0 +1,69 @@
+:root {
+  /* Paleta base: azul marino / azul intenso con acentos naranja. */
+  --navy-900: #061527;
+  --navy-800: #0b1f3a;
+  --navy-700: #123a6b;
+  --navy-600: #1b4f8f;
+  --navy-500: #2a6bc0;
+  --navy-100: #dbe7f7;
+
+  --orange-600: #e35d00;
+  --orange-500: #ff7a1a;
+  --orange-400: #ff9d3c;
+
+  --green-500: #1f9d55;
+  --green-600: #167a41;
+  --amber-500: #d98a00;
+  --red-500: #d92d20;
+  --red-600: #b01f14;
+
+  --bg: #f2f5fa;
+  --surface: #ffffff;
+  --surface-2: #eef3fb;
+  --text: #0f1e33;
+  --text-muted: #51617a;
+  --border: #cfd9e8;
+
+  --radius: 14px;
+  --radius-sm: 10px;
+  --shadow: 0 2px 10px rgba(6, 21, 39, 0.08);
+  --shadow-lg: 0 8px 26px rgba(6, 21, 39, 0.18);
+
+  --font-scale: 1;
+  --header-h: 56px;
+  --tabbar-h: 64px;
+
+  --focus: var(--orange-500);
+}
+
+/* Tamaños de texto */
+html[data-textsize='grande'] {
+  --font-scale: 1.12;
+}
+html[data-textsize='muy-grande'] {
+  --font-scale: 1.28;
+}
+
+/* Tema de alto contraste (AAA) */
+html[data-contrast='true'] {
+  --bg: #000000;
+  --surface: #000000;
+  --surface-2: #0a0a0a;
+  --text: #ffffff;
+  --text-muted: #f2f2f2;
+  --border: #ffffff;
+  --navy-800: #000000;
+  --navy-700: #10233f;
+  --green-500: #00d76a;
+  --green-600: #00b85b;
+  --amber-500: #ffc400;
+  --red-500: #ff4d4d;
+  --orange-500: #ffa53c;
+  --shadow: none;
+  --shadow-lg: none;
+}
+html[data-contrast='true'] .card,
+html[data-contrast='true'] .btn,
+html[data-contrast='true'] .tab {
+  border: 2px solid var(--border);
+}

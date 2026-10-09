@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Hodēgeō">
+  <rect width="512" height="512" rx="96" fill="#0b1f3a" />
+  <g stroke="#ff7a1a" stroke-width="38" fill="none" stroke-linecap="round">
+    <path d="M174 440 L322 143" />
+    <path d="M322 143 a 66 66 0 1 1 66 66" />
+  </g>
+  <circle cx="174" cy="440" r="46" fill="#ffffff" />
+</svg>
