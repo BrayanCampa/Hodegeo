@@ -6,8 +6,8 @@ import {
   CHAR_CONFIG,
   CHAR_DISTANCE,
   CHAR_SELFTEST,
-  DEVICE_NAME_PREFIX,
   DISTANCE_NONE,
+  isHodegeoDeviceName,
   SERVICE_UUID,
 } from './uuids';
 import type {
@@ -48,6 +48,22 @@ function bytes(...values: number[]): Uint8Array<ArrayBuffer> {
   return arr;
 }
 
+/** Detecta si el error corresponde a la cancelación del diálogo por el usuario. */
+function isUserCancellation(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof DOMException || err instanceof Error) {
+    if (err.name === 'AbortError') return true;
+    const msg = err.message.toLowerCase();
+    return (
+      msg.includes('user cancelled') ||
+      msg.includes('user canceled') ||
+      msg.includes('user rejected') ||
+      msg.includes('chooser')
+    );
+  }
+  return false;
+}
+
 /**
  * BleTransport — bastón real por Web Bluetooth.
  * Respeta exactamente el contrato del firmware (UUIDs, formatos y little-endian).
@@ -67,6 +83,7 @@ export class BleTransport implements CaneTransport {
 
   private device: BluetoothDevice | null = null;
   private server: BluetoothRemoteGATTServer | null = null;
+  private service: BluetoothRemoteGATTService | null = null;
   private chars = new Map<string, BluetoothRemoteGATTCharacteristic>();
   private intentional = false;
   private reconnecting = false;
@@ -104,13 +121,24 @@ export class BleTransport implements CaneTransport {
     let device: BluetoothDevice;
     try {
       device = await navigator.bluetooth.requestDevice({
-        filters: [{ namePrefix: DEVICE_NAME_PREFIX }, { services: [SERVICE_UUID] }],
+        filters: [
+          { namePrefix: 'Hodegeo' },
+          { namePrefix: 'Hodēgeō' },
+          { namePrefix: 'hodegeo' },
+          { namePrefix: 'hodēgeō' },
+          { services: [SERVICE_UUID] },
+        ],
         optionalServices: [SERVICE_UUID],
       });
     } catch (err) {
+      this.emit('connection', { state: 'disconnected' });
+      if (isUserCancellation(err)) {
+        this.log('INFO', 'Selector de Bluetooth cancelado por el usuario.');
+        throw new Error('No se seleccionó ningún dispositivo (se canceló la búsqueda).');
+      }
       const msg = err instanceof Error ? err.message : String(err);
-      this.log('ERR', `Selector cancelado o error: ${msg}`);
-      throw new Error('No se seleccionó ningún dispositivo (o se canceló la búsqueda).');
+      this.log('ERR', `Error al seleccionar dispositivo: ${msg}`);
+      throw new Error(this.friendlyConnectError(err));
     }
 
     this.device = device;
@@ -122,52 +150,152 @@ export class BleTransport implements CaneTransport {
       const msg = err instanceof Error ? err.message : String(err);
       this.log('ERR', `No se pudo conectar: ${msg}`);
       this.emit('connection', { state: 'disconnected' });
-      throw new Error(this.friendlyConnectError(msg));
+      throw new Error(this.friendlyConnectError(err, device));
     }
   }
 
-  private friendlyConnectError(msg: string): string {
+  private friendlyConnectError(err: unknown, device?: BluetoothDevice | null): string {
+    const msg = err instanceof Error ? err.message : String(err);
     const lower = msg.toLowerCase();
-    if (lower.includes('not found') || lower.includes('service')) {
+
+    // Mensaje explícito interno (cuando se determinó que no es un bastón)
+    if (msg.includes('Este dispositivo no parece ser un bastón Hodēgeō.')) {
       return 'Este dispositivo no parece ser un bastón Hodēgeō.';
     }
-    if (lower.includes('adapter') || lower.includes('network') || lower.includes('bluetooth')) {
+
+    // Cancelación explícita del selector por el usuario
+    if (isUserCancellation(err)) {
+      return 'No se seleccionó ningún dispositivo (se canceló la búsqueda).';
+    }
+
+    // Bluetooth apagado o no disponible en el teléfono
+    if (
+      lower.includes('adapter') ||
+      lower.includes('turned off') ||
+      lower.includes('disabled') ||
+      lower.includes('radio')
+    ) {
       return 'El Bluetooth del celular está apagado o no disponible.';
     }
+
+    // Si el usuario seleccionó un dispositivo cuyo nombre coincide con Hodēgeō
+    if (isHodegeoDeviceName(device?.name)) {
+      if (
+        lower.includes('gatt') ||
+        lower.includes('network') ||
+        lower.includes('connection') ||
+        lower.includes('connect')
+      ) {
+        return 'No se pudo establecer la conexión GATT con el bastón Hodēgeō. Verifica que esté encendido y cerca.';
+      }
+      return 'Error al comunicarse con los servicios del bastón Hodēgeō. Inténtalo de nuevo.';
+    }
+
+    // Si el usuario seleccionó otro dispositivo que no coincide y falló el servicio
+    if (device && !isHodegeoDeviceName(device.name) && (lower.includes('not found') || lower.includes('service'))) {
+      return 'Este dispositivo no parece ser un bastón Hodēgeō.';
+    }
+
+    // Si falló por falta de dispositivos encontrados en el selector
+    if (lower.includes('no devices') || lower.includes('not found')) {
+      return 'No se encontró ningún bastón Hodēgeō. Asegúrate de encenderlo e inténtalo de nuevo.';
+    }
+
     return 'No se pudo conectar con el bastón. Inténtalo de nuevo.';
   }
 
-  /** Conecta GATT, obtiene características y reengancha suscripciones. */
+  /** Conecta GATT, obtiene características secuencialmente y engancha suscripciones. */
   private async openGatt(device: BluetoothDevice, initial: boolean): Promise<void> {
-    if (!device.gatt) throw new Error('GATT no disponible.');
+    if (!device.gatt) throw new Error('GATT no disponible en este dispositivo.');
+
     const server = await device.gatt.connect();
     this.server = server;
-    this.log('INFO', `GATT conectado a ${device.name ?? 'Hodegeo'}`);
+    const deviceLabel = device.name ?? 'bastón Hodēgeō';
+    this.log('INFO', `GATT conectado a ${deviceLabel}.`);
 
-    const service = await server.getPrimaryService(SERVICE_UUID);
-    const [distance, battery, button, config, command, selftest] = await Promise.all([
-      service.getCharacteristic(CHAR_DISTANCE),
-      service.getCharacteristic(CHAR_BATTERY),
-      service.getCharacteristic(CHAR_BUTTON),
-      service.getCharacteristic(CHAR_CONFIG),
-      service.getCharacteristic(CHAR_COMMAND),
-      service.getCharacteristic(CHAR_SELFTEST),
-    ]);
+    // Pausa breve para estabilizar el enlace GATT en Android/Chrome
+    await this.delay(150);
 
-    this.chars.set('distance', distance);
-    this.chars.set('battery', battery);
-    this.chars.set('button', button);
-    this.chars.set('config', config);
-    this.chars.set('command', command);
-    this.chars.set('selftest', selftest);
+    // Consulta del servicio principal de forma secuencial y con reintento
+    let service: BluetoothRemoteGATTService | null = null;
+    try {
+      service = await server.getPrimaryService(SERVICE_UUID);
+    } catch (err) {
+      this.log('ERR', `Primer intento de servicio principal: ${this.errMsg(err)}. Reintentando…`);
+      await this.delay(250);
+      try {
+        service = await server.getPrimaryService(SERVICE_UUID);
+      } catch (retryErr) {
+        this.log('ERR', `Reintento de servicio principal falló: ${this.errMsg(retryErr)}`);
+      }
+    }
 
-    await this.subscribe(distance, 'distance');
-    await this.subscribe(battery, 'battery');
-    await this.subscribe(button, 'button');
-    await this.subscribe(selftest, 'selftest');
+    // Consulta alternativa mediante getPrimaryServices() si getPrimaryService() arrojó excepción
+    if (!service && typeof server.getPrimaryServices === 'function') {
+      try {
+        await this.delay(100);
+        const services = await server.getPrimaryServices();
+        service = services.find((s) => s.uuid.toLowerCase() === SERVICE_UUID.toLowerCase()) ?? null;
+      } catch (listErr) {
+        this.log('ERR', `Consulta de lista de servicios GATT falló: ${this.errMsg(listErr)}`);
+      }
+    }
 
-    // Lecturas iniciales.
-    await this.readInitial();
+    const isNamedHodegeo = isHodegeoDeviceName(device.name);
+
+    // Si no se encontró el servicio y el nombre no coincide con Hodēgeō, rechazamos el dispositivo
+    if (!service && !isNamedHodegeo) {
+      throw new Error('Este dispositivo no parece ser un bastón Hodēgeō.');
+    }
+
+    this.service = service;
+
+    if (service) {
+      this.log('INFO', 'Servicio Hodēgeō detectado. Consultando características secuencialmente…');
+
+      const charDefs: {
+        key: string;
+        uuid: string;
+        label: string;
+        notify: boolean;
+      }[] = [
+        { key: 'distance', uuid: CHAR_DISTANCE, label: 'distancia', notify: true },
+        { key: 'battery', uuid: CHAR_BATTERY, label: 'batería', notify: true },
+        { key: 'button', uuid: CHAR_BUTTON, label: 'botón', notify: true },
+        { key: 'config', uuid: CHAR_CONFIG, label: 'configuración', notify: false },
+        { key: 'command', uuid: CHAR_COMMAND, label: 'comando', notify: false },
+        { key: 'selftest', uuid: CHAR_SELFTEST, label: 'autotest', notify: true },
+      ];
+
+      for (const def of charDefs) {
+        try {
+          await this.delay(60);
+          const char = await service.getCharacteristic(def.uuid);
+          this.chars.set(def.key, char);
+          this.log('INFO', `Característica obtenida: ${def.label}.`);
+
+          if (def.notify) {
+            await this.delay(60);
+            try {
+              await this.subscribe(char, def.key);
+            } catch (subErr) {
+              this.log('ERR', `No se pudo suscribir a ${def.label}: ${this.errMsg(subErr)}`);
+            }
+          }
+        } catch (charErr) {
+          this.log('ERR', `No se pudo obtener la característica ${def.label}: ${this.errMsg(charErr)}`);
+        }
+      }
+
+      // Lecturas iniciales protegidas individualmente
+      await this.readInitial();
+    } else {
+      // El dispositivo coincide por nombre pero los servicios aún no se pudieron leer
+      this.log(
+        'INFO',
+        `Dispositivo «${deviceLabel}» validado por nombre. Sesión activa establecida directamente.`,
+      );
+    }
 
     this.emit('connection', { state: 'connected' });
     if (!initial) {
@@ -218,10 +346,27 @@ export class BleTransport implements CaneTransport {
     }
   }
 
+  private async getOrFetchChar(
+    key: string,
+    uuid: string,
+  ): Promise<BluetoothRemoteGATTCharacteristic | null> {
+    let char = this.chars.get(key);
+    if (!char && this.service) {
+      try {
+        char = await this.service.getCharacteristic(uuid);
+        this.chars.set(key, char);
+      } catch {
+        // No disponible de momento.
+      }
+    }
+    return char ?? null;
+  }
+
   private async readInitial(): Promise<void> {
     try {
-      const battery = this.chars.get('battery');
+      const battery = await this.getOrFetchChar('battery', CHAR_BATTERY);
       if (battery) {
+        await this.delay(50);
         const v = await battery.readValue();
         const raw = v.getUint8(0);
         this.emit('battery', raw === BATTERY_UNKNOWN ? null : raw);
@@ -231,8 +376,12 @@ export class BleTransport implements CaneTransport {
       this.log('ERR', `No se pudo leer la batería: ${this.errMsg(err)}`);
     }
     try {
-      const cfg = await this.readConfig();
-      void cfg;
+      const config = await this.getOrFetchChar('config', CHAR_CONFIG);
+      if (config) {
+        await this.delay(50);
+        const cfg = await this.readConfig();
+        void cfg;
+      }
     } catch (err) {
       this.log('ERR', `No se pudo leer la configuración: ${this.errMsg(err)}`);
     }
@@ -256,6 +405,7 @@ export class BleTransport implements CaneTransport {
 
   private reset(): void {
     this.chars.clear();
+    this.service = null;
     this.server = null;
     this.device = null;
   }
@@ -266,6 +416,9 @@ export class BleTransport implements CaneTransport {
     // Los actuadores se apagan al perderse el enlace.
     this.emit('alert', { buzzer: false, motor: false });
     this.emit('connection', { state: 'disconnected', unexpected: true });
+    this.chars.clear();
+    this.service = null;
+    this.server = null;
     void this.reconnect();
   };
 
@@ -296,7 +449,7 @@ export class BleTransport implements CaneTransport {
   // ---- configuración y comandos ----
 
   async readConfig(): Promise<CaneConfig> {
-    const config = this.chars.get('config');
+    const config = await this.getOrFetchChar('config', CHAR_CONFIG);
     if (!config) throw new Error('Configuración no disponible.');
     const v = await config.readValue();
     const alertCm = v.getUint16(0, true);
@@ -306,7 +459,7 @@ export class BleTransport implements CaneTransport {
   }
 
   async writeConfig(cfg: CaneConfig): Promise<void> {
-    const config = this.chars.get('config');
+    const config = await this.getOrFetchChar('config', CHAR_CONFIG);
     if (!config) throw new Error('Configuración no disponible.');
     const alertCm = Math.max(30, Math.min(300, Math.round(cfg.alertCm)));
     const payload = bytes(alertCm & 0xff, (alertCm >> 8) & 0xff, cfg.mode);
@@ -315,7 +468,7 @@ export class BleTransport implements CaneTransport {
   }
 
   async sendCommand(cmd: CaneCommand): Promise<void> {
-    const command = this.chars.get('command');
+    const command = await this.getOrFetchChar('command', CHAR_COMMAND);
     if (!command) throw new Error('Comando no disponible.');
     const payload = bytes(cmd);
     await this.writeChar(command, payload);
@@ -323,7 +476,7 @@ export class BleTransport implements CaneTransport {
   }
 
   async readBattery(): Promise<number | null> {
-    const battery = this.chars.get('battery');
+    const battery = await this.getOrFetchChar('battery', CHAR_BATTERY);
     if (!battery) return null;
     const v = await battery.readValue();
     const raw = v.getUint8(0);

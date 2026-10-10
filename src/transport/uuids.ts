@@ -13,6 +13,19 @@ export const CHAR_SELFTEST = '7a1c0007-5b3e-4d8a-9c2f-0a1b2c3d4e5f'; // uint8: 1
 /** Nombre anunciado por el bastón (prefijo de filtro). */
 export const DEVICE_NAME_PREFIX = 'Hodegeo';
 
+/**
+ * Comprueba si el nombre del dispositivo coincide con el bastón Hodēgeō
+ * (tolera variaciones con/sin macrón, mayúsculas y sufijos).
+ */
+export function isHodegeoDeviceName(name?: string | null): boolean {
+  if (!name) return false;
+  const normalized = name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return normalized.includes('hodegeo');
+}
+
 /** Valor centinela de "sin lectura" para la distancia (uint16). */
 export const DISTANCE_NONE = 0xffff;
 
